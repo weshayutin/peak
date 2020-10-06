@@ -82,6 +82,9 @@ function installop() {
         return 0
     fi
 
+    # subscription namespace
+    local subsns
+
     # testproj is based on the operator name with a random string,
     # we'll use it to name subscriptions etc too
     local testproj
@@ -96,27 +99,13 @@ function installop() {
     set +e
     if [ "$installMode" == "true" ]; then
         echo "install $1 in namespace openshift-operators"
+        subsns=openshift-operators
 
 	# For global operators we're just using testproj for a name, so make
 	# one if we have not created the project
         if [ "$testproj" == "" ]; then
 	    testproj=$(random_name $1)
 	fi
-
-        cat <<- EOF | oc create -f -
-	apiVersion: operators.coreos.com/v1alpha1
-	kind: Subscription
-	metadata:
-	  name: $testproj
-	  namespace: openshift-operators
-	  labels:
-	     peak.test.subscription: $1
-	spec:
-	  channel: $2
-	  name: $1
-	  source: $csource
-	  sourceNamespace: $csourcens
-	EOF
     else
 	# make sure project exists since we can decouple project and operator creation
         if [ "$testproj" == "" ]; then
@@ -125,6 +114,7 @@ function installop() {
 	fi
 
         echo "install $1 in namespace $testproj"
+        subsns=$testproj
 
         # in this case we need to make an operator group in the new project
         cat <<- EOF | oc create -f -
@@ -132,31 +122,44 @@ function installop() {
 	kind: OperatorGroup
 	metadata:
 	  name: "$testproj"
-	  namespace: "$testproj"
+	  namespace: "$subsns"
 	  labels:
 	     peak.test.operatorgroup: $1
 	spec:
 	  targetNamespaces:
 	  - "$testproj"
 	EOF
+    fi
 
-        # create a subscription object
-        cat <<- EOF | oc create -f -
+    # create a subscription object
+    cat <<- EOF | oc create -f -
 	apiVersion: operators.coreos.com/v1alpha1
 	kind: Subscription
 	metadata:
 	  name: $testproj
-	  namespace: $testproj
+	  namespace: $subsns
 	  labels:
-	     peak.test.subscription: $1
+	    peak.test.subscription: $1
 	spec:
 	  channel: $2
 	  name: $1
 	  source: $csource
 	  sourceNamespace: $csourcens
 	EOF
-    fi
     set -e
+
+    # wait for install
+    for _ in $(seq 1 30); do
+        csv=$(oc -n "$subsns" get subscription "$testproj" -o jsonpath='{.status.installedCSV}' || true)
+        if [[ -n "$csv" ]]; then
+            if [[ "$(oc -n "$subsns" get csv "$csv" -o jsonpath='{.status.phase}')" == "Succeeded" ]]; then
+                echo "$1 installed"
+                return
+            fi
+        fi
+        sleep 10
+    done
+    echo "$1 install failed"
 }
 
 function addtestdir() {
